@@ -291,4 +291,52 @@ mod tests {
         let min_ratio = TickMath::get_ratio_at_tick(TickMath::MIN_TICK).unwrap();
         assert!(min_ratio >= TickMath::MIN_RATIOX48);
     }
+
+    // Proof of Concept: Demonstrating rounding sensitivity in TickMath
+    // This test shows how small changes in ratio can lead to different ticks due to rounding,
+    // potentially causing incorrect liquidation thresholds.
+    #[test]
+    fn poc_rounding_sensitivity_in_tick_calculations() {
+        // Start with a base ratio near the liquidation threshold
+        let base_ratio = 1_000_000_000_000_000_000u128; // 1e18, representing a typical ratio
+
+        // Get the tick for the base ratio
+        let (base_tick, _) = TickMath::get_tick_at_ratio(base_ratio).unwrap();
+
+        // Slightly perturb the ratio (simulate rounding or oracle noise)
+        let perturbed_ratios = vec![
+            base_ratio + 1,      // +1 (minimal increase)
+            base_ratio - 1,      // -1 (minimal decrease)
+            base_ratio + 1000,   // +1000 (small increase)
+            base_ratio - 1000,   // -1000 (small decrease)
+        ];
+
+        for &ratio in &perturbed_ratios {
+            if ratio >= TickMath::MIN_RATIOX48 && ratio <= TickMath::MAX_RATIOX48 {
+                let (tick, _) = TickMath::get_tick_at_ratio(ratio).unwrap();
+                println!("Ratio: {}, Tick: {} (Base Tick: {})", ratio, tick, base_tick);
+
+                // In a real liquidation, a tick difference could mean the position is incorrectly
+                // classified as safe or unsafe, leading to bad debt or unfair liquidations.
+                // For example, if base_tick is the liquidation threshold, a +1 could push it to unsafe.
+                assert!(tick.abs_diff(base_tick) <= 1, "Tick jump too large for small ratio change");
+            }
+        }
+
+        // Demonstrate edge case: ratios very close to tick boundaries
+        let boundary_ratio = TickMath::get_ratio_at_tick(1000).unwrap();
+        let close_ratios = vec![
+            boundary_ratio - 1,
+            boundary_ratio + 1,
+        ];
+
+        for &ratio in &close_ratios {
+            if ratio >= TickMath::MIN_RATIOX48 && ratio <= TickMath::MAX_RATIOX48 {
+                let (tick, _) = TickMath::get_tick_at_ratio(ratio).unwrap();
+                println!("Boundary Ratio: {}, Tick: {}", ratio, tick);
+                // Rounding could cause tick to be 999 or 1001 instead of 1000,
+                // affecting liquidation logic.
+            }
+        }
+    }
 }
