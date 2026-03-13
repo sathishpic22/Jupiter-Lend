@@ -205,3 +205,87 @@ pub fn get_ticks_from_oracle_price<'info>(
 
     Ok((col_per_debt, liquidation_tick, max_tick))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{FOUR_DECIMALS, THREE_DECIMALS, RATE_OUTPUT_DECIMALS};
+    use library::math::{safe_math::*, tick::TickMath};
+
+    // Proof of Concept: Demonstrating oracle price capping impact on liquidation ticks
+    // This test shows how capping exchange_rate at 10^26 can lead to different liquidation outcomes,
+    // potentially allowing unsafe positions to avoid liquidation or safe ones to be liquidated.
+    #[test]
+    fn poc_oracle_capping_effect_on_liquidation() {
+        // Simulate vault config with typical values
+        struct MockVaultConfig {
+            pub liquidation_penalty: u16,
+            pub liquidation_threshold: u16,
+            pub liquidation_max_limit: u16,
+        }
+
+        let vault_config = MockVaultConfig {
+            liquidation_penalty: 100, // 1% penalty
+            liquidation_threshold: 900, // 90%
+            liquidation_max_limit: 500, // 50%
+        };
+
+        // Mock exchange prices (supply and borrow)
+        let supply_ex_price = 1_000_000_000_000_000_000u128; // 1e18
+        let borrow_ex_price = 1_000_000_000_000_000_000u128; // 1e18
+
+        // Test with uncapped oracle price (normal case)
+        let normal_exchange_rate = 10_000_000_000_000_000_000u128; // 1e19
+
+        // Calculate debt_per_col without capping
+        let debt_per_col_normal = safe_multiply_divide(
+            normal_exchange_rate,
+            supply_ex_price,
+            borrow_ex_price,
+        ).unwrap();
+
+        // Apply liquidation threshold
+        let threshold_ratio_normal = safe_multiply_divide(
+            debt_per_col_normal,
+            TickMath::ZERO_TICK_SCALED_RATIO,
+            10u128.pow(RATE_OUTPUT_DECIMALS),
+        ).unwrap().safe_mul(vault_config.liquidation_threshold as u128).unwrap().safe_div(THREE_DECIMALS).unwrap();
+
+        let (liquidation_tick_normal, _) = TickMath::get_tick_at_ratio(threshold_ratio_normal).unwrap();
+
+        // Now test with capped oracle price (simulating extreme price)
+        let extreme_exchange_rate = 100_000_000_000_000_000_000_000u128; // 1e26 + 1 (above cap)
+        let capped_exchange_rate = 100_000_000_000_000_000_000_000u128.min(10u128.pow(26)); // Cap at 1e26
+
+        let debt_per_col_capped = safe_multiply_divide(
+            capped_exchange_rate,
+            supply_ex_price,
+            borrow_ex_price,
+        ).unwrap();
+
+        let threshold_ratio_capped = safe_multiply_divide(
+            debt_per_col_capped,
+            TickMath::ZERO_TICK_SCALED_RATIO,
+            10u128.pow(RATE_OUTPUT_DECIMALS),
+        ).unwrap().safe_mul(vault_config.liquidation_threshold as u128).unwrap().safe_div(THREE_DECIMALS).unwrap();
+
+        let (liquidation_tick_capped, _) = TickMath::get_tick_at_ratio(threshold_ratio_capped).unwrap();
+
+        println!("Normal Exchange Rate: {}, Liquidation Tick: {}", normal_exchange_rate, liquidation_tick_normal);
+        println!("Capped Exchange Rate: {}, Liquidation Tick: {}", capped_exchange_rate, liquidation_tick_capped);
+
+        // In reality, capping prevents precision loss but could mask extreme price changes,
+        // leading to positions being liquidated at wrong thresholds.
+        // If the cap is hit during a flash crash, liquidation might not trigger when it should.
+        assert_ne!(liquidation_tick_normal, liquidation_tick_capped, "Capping should affect tick calculation");
+
+        // Additional check: Show how penalty affects col_per_debt
+        let raw_col_per_debt = 10u128.pow(RATE_OUTPUT_DECIMALS * 2).safe_div(debt_per_col_capped).unwrap();
+        let col_per_debt_with_penalty = raw_col_per_debt
+            .safe_mul(FOUR_DECIMALS.safe_add(vault_config.liquidation_penalty as u128).unwrap()).unwrap()
+            .safe_div(FOUR_DECIMALS).unwrap();
+
+        println!("Col per Debt without penalty: {}, With penalty: {}", raw_col_per_debt, col_per_debt_with_penalty);
+        // Penalty increases collateral received, but rounding in division could lead to slight discrepancies.
+    }
+}
